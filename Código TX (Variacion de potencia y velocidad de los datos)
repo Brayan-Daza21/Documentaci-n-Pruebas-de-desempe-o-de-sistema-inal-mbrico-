@@ -1,0 +1,100 @@
+from machine import Pin, ADC, I2C, SPI
+from nrf24l01 import NRF24L01
+from ssd1306 import SSD1306_I2C
+from mpu6050 import MPU6050
+from time import sleep
+
+# --- CONFIGURACIÓN SPI / NRF24L01 ---
+spi = SPI(0, sck=Pin(18), mosi=Pin(19), miso=Pin(16))
+csn = Pin(17, Pin.OUT)
+ce = Pin(22, Pin.OUT)
+
+# --- CONFIGURACIÓN I2C (OLED + MPU6050) ---
+i2c_oled = I2C(1, scl=Pin(3), sda=Pin(2))
+oled = SSD1306_I2C(128, 64, i2c_oled)
+
+i2c_mpu = I2C(0, scl=Pin(1), sda=Pin(0))
+mpu = MPU6050(i2c_mpu)
+
+# --- JOYSTICK ---
+joy_x = ADC(26)
+
+# --- OPCIONES DE CONFIGURACIÓN ---
+power_levels = [-18, -12, -6, 0]
+data_rates = ["250kbps", "1Mbps", "2Mbps"]
+
+# --- MENÚ SERIAL ---
+print("=== CONFIGURACIÓN NRF24L01 ===")
+print("Seleccione potencia (dBm):")
+for i, p in enumerate(power_levels):
+    print(f"[{i}] {p} dBm")
+p_sel = int(input("Opción: "))
+if p_sel < 0 or p_sel > 3:
+    p_sel = 3
+
+print("\nSeleccione data rate:")
+for i, r in enumerate(data_rates):
+    print(f"[{i}] {r}")
+r_sel = int(input("Opción: "))
+if r_sel < 0 or r_sel > 2:
+    r_sel = 0
+
+# --- INICIALIZAR NRF24L01 ---
+nrf = NRF24L01(spi, csn, ce, channel=98, payload_size=8)
+nrf.open_tx_pipe(b'\xe1\xf0\xf0\xf0\xf0')
+nrf.open_rx_pipe(1, b'\xd2\xf0\xf0\xf0\xf0')
+nrf.stop_listening()
+
+# --- CONFIGURAR RF_SETUP ---
+rf_setup = 0
+if r_sel == 0:  # 250 kbps
+    rf_setup |= 0x20
+elif r_sel == 2:  # 2 Mbps
+    rf_setup |= 0x08
+rf_setup |= (p_sel & 0x03) << 1
+nrf.reg_write(0x06, rf_setup)
+
+print("\n✅ Configuración completa:")
+print(f"Potencia: {power_levels[p_sel]} dBm")
+print(f"Data Rate: {data_rates[r_sel]}")
+
+# --- FUNCIÓN PARA CALCULAR ÁNGULO ---
+def calcular_angulo(x_val):
+    return int((x_val / 255) * 180)
+
+# --- BUCLE PRINCIPAL ---
+while True:
+    x_val = joy_x.read_u16() // 256
+    servo_angle = calcular_angulo(x_val)
+
+    accel = mpu.get_accel_data()
+    ax = int((accel['x'] / 2) * 127) & 0xFF
+    ay = int((accel['y'] / 2) * 127) & 0xFF
+    az = int((accel['z'] / 2) * 127) & 0xFF
+
+    # Paquete con configuración incluida
+    data = bytes([
+        servo_angle & 0xFF,
+        ax,
+        ay,
+        az,
+        p_sel,
+        r_sel,
+        0,
+        0
+    ])
+    
+    try:
+        nrf.send(data)
+        oled.fill(0)
+        oled.text("TX ACTIVO", 25, 0)
+        oled.text(f"Ang:{servo_angle:3d}", 0, 20)
+        oled.text(f"P:{power_levels[p_sel]}dBm", 0, 40)
+        oled.text(f"DR:{data_rates[r_sel]}", 0, 52)
+        oled.show()
+
+        print(f"📡 Enviado | Ang={servo_angle}° | P={power_levels[p_sel]} | DR={data_rates[r_sel]}")
+    except Exception as e:
+        print("⚠️ Error al enviar:", e)
+
+    sleep(0.2)
