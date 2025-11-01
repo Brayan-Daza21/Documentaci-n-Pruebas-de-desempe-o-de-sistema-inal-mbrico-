@@ -1,0 +1,85 @@
+from machine import Pin, SPI, PWM
+from nrf24l01 import NRF24L01
+from ssd1306_spi import SSD1306_SPI
+from time import sleep, ticks_ms, ticks_diff
+
+# --- CONFIGURACIÓN NRF24L01 (SPI0) ---
+CANAL_RF = 98
+spi_nrf = SPI(0, sck=Pin(18), mosi=Pin(19), miso=Pin(16))
+csn = Pin(17, Pin.OUT)
+ce = Pin(22, Pin.OUT)
+nrf = NRF24L01(spi_nrf, csn, ce, channel=CANAL_RF, payload_size=8)
+nrf.open_tx_pipe(b'\xd2\xf0\xf0\xf0\xf0')
+nrf.open_rx_pipe(1, b'\xe1\xf0\xf0\xf0\xf0')
+nrf.start_listening()
+
+# --- OLED SPI (SPI1) ---
+spi_disp = SPI(1, baudrate=4000000, polarity=0, phase=0, sck=Pin(10), mosi=Pin(11))
+dc = Pin(13, Pin.OUT)
+rst = Pin(12, Pin.OUT)
+cs = Pin(9, Pin.OUT)
+oled = SSD1306_SPI(128, 64, spi_disp, dc, rst, cs)
+
+# --- Servo ---
+servo = PWM(Pin(15))
+servo.freq(50)
+
+# --- Niveles de potencia y data rates ---
+power_levels = [-18, -12, -6, 0]
+data_rates = ["250kbps", "1Mbps", "2Mbps"]
+
+# --- Función para mover servo según ángulo recibido (0–180°) ---
+def mover_servo(angulo):
+    duty_min = 1638   # 0.5 ms
+    duty_max = 8192   # 2.5 ms
+    duty = duty_min + int((angulo / 180) * (duty_max - duty_min))
+    servo.duty_u16(duty)
+
+# --- Mostrar datos en OLED ---
+def mostrar_datos(angulo, p_sel, r_sel):
+    oled.fill(0)
+    oled.text("RX NRF24L01", 20, 0)
+    oled.text(f"Canal:{CANAL_RF}", 25, 16)
+    oled.text(f"Angulo:{angulo:3d}°", 20, 36)
+    oled.text(f"{power_levels[p_sel]}dBm {data_rates[r_sel]}", 20, 52)
+    oled.show()
+
+print(f"Receptor iniciado en canal {CANAL_RF} (frecuencia {2400 + CANAL_RF} MHz)")
+
+ultimo_paquete = ticks_ms()
+sin_senal = False
+
+# --- Bucle principal ---
+while True:
+    if nrf.any():
+        buf = nrf.recv()
+        ultimo_paquete = ticks_ms()
+        sin_senal = False
+
+        def to_signed(val):
+            return val - 256 if val > 127 else val
+
+        # Estructura recibida:
+        # [0]=ángulo, [1]=ax, [2]=ay, [3]=az, [4]=p_sel, [5]=r_sel
+        if len(buf) >= 6:
+            angulo = buf[0]
+            ax = to_signed(buf[1])
+            ay = to_signed(buf[2])
+            az = to_signed(buf[3])
+            p_sel = buf[4] if buf[4] < len(power_levels) else 3
+            r_sel = buf[5] if buf[5] < len(data_rates) else 0
+
+            mover_servo(angulo)
+            mostrar_datos(angulo, p_sel, r_sel)   # ← AQUÍ SE ACTUALIZA LA OLED
+
+            print(f"[CH {CANAL_RF}] AX:{ax} AY:{ay} AZ:{az} | Ángulo:{angulo}° | Pot:{power_levels[p_sel]} | DR:{data_rates[r_sel]}")
+
+    else:
+        if ticks_diff(ticks_ms(), ultimo_paquete) > 2000 and not sin_senal:
+            oled.fill(0)
+            oled.text("SIN SENAL", 25, 25)
+            oled.show()
+            print("⚠️ SIN SEÑAL ⚠️")
+            sin_senal = True
+
+    sleep(0.1)
