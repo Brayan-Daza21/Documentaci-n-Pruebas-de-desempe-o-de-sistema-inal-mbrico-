@@ -1,0 +1,68 @@
+from machine import Pin, ADC, I2C, SPI
+from nrf24l01 import NRF24L01
+from time import sleep
+from ssd1306 import SSD1306_I2C
+from mpu6050 import MPU6050
+
+# --- CONFIGURACIÓN DE SPI PARA NRF24L01 ---
+spi = SPI(0, sck=Pin(18), mosi=Pin(19), miso=Pin(16))
+csn = Pin(17, Pin.OUT)
+ce = Pin(22, Pin.OUT)
+
+# Inicializar módulo NRF24L01
+nrf = NRF24L01(spi, csn, ce, channel=76, payload_size=16)
+nrf.open_tx_pipe(b'\xe1\xf0\xf0\xf0\xf0')  # Dirección del receptor
+nrf.open_rx_pipe(1, b'\xd2\xf0\xf0\xf0\xf0')
+nrf.stop_listening()
+
+# --- CONFIGURACIÓN DEL DISPLAY OLED (I2C) ---
+i2c_oled = I2C(1, scl=Pin(3), sda=Pin(2))
+oled = SSD1306_I2C(128, 64, i2c_oled)
+
+# --- CONFIGURACIÓN DEL SENSOR MPU6050 (I2C) ---
+i2c_mpu = I2C(0, scl=Pin(1), sda=Pin(0))
+mpu = MPU6050(i2c_mpu)
+
+# --- CONFIGURACIÓN DEL JOYSTICK ---
+joy_x = ADC(26)   # VRx
+joy_y = ADC(27)   # VRy
+
+# --- BUCLE PRINCIPAL ---
+while True:
+    # --- Leer joystick (0–255) ---
+    x_val = joy_x.read_u16() // 256
+    y_val = joy_y.read_u16() // 256
+
+    # --- Mostrar joystick en OLED ---
+    oled.fill(0)
+    oled.text("JOYSTICK", 30, 0)
+    oled.text(f"X:{x_val:3d}", 0, 20)
+    oled.text(f"Y:{y_val:3d}", 0, 35)
+    # Dibujar recuadro de movimiento
+    oled.rect(80, 15, 40, 40, 1)
+    x_pos = 100 + (x_val - 128) // 8
+    y_pos = 35 + (y_val - 128) // 8
+    oled.fill_rect(x_pos, y_pos, 3, 3, 1)
+    oled.show()
+
+    # --- Leer datos del acelerómetro ---
+    accel = mpu.get_accel_data()  # valores en m/s²
+    # Escalar ±2g → ±127
+    ax = int((accel['x'] / 2) * 127)
+    ay = int((accel['y'] / 2) * 127)
+    az = int((accel['z'] / 2) * 127)
+
+    # --- Empaquetar y enviar datos ---
+    try:
+        data = bytes([
+            x_val, y_val,
+            ax & 0xFF, ay & 0xFF, az & 0xFF,
+            0, 0, 0
+        ])
+        nrf.send(data)
+        # Mostrar por consola
+        print(f"📡 Enviado: X={x_val}, Y={y_val}, AX={ax}, AY={ay}, AZ={az}")
+    except Exception as e:
+        print("⚠️ Error al enviar datos:", e)
+
+    sleep(0.1)
