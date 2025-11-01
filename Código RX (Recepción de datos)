@@ -1,0 +1,65 @@
+from machine import Pin, SPI, PWM
+from nrf24l01 import NRF24L01
+from ssd1306_spi import SSD1306_SPI
+from time import sleep
+
+# --- CONFIGURACIÓN NRF24L01 (SPI0) ---
+spi_nrf = SPI(0, sck=Pin(18), mosi=Pin(19), miso=Pin(16))
+csn = Pin(17, Pin.OUT)
+ce = Pin(22, Pin.OUT)
+nrf = NRF24L01(spi_nrf, csn, ce, channel=76, payload_size=16)
+nrf.open_tx_pipe(b'\xd2\xf0\xf0\xf0\xf0')
+nrf.open_rx_pipe(1, b'\xe1\xf0\xf0\xf0\xf0')
+nrf.start_listening()
+
+# --- OLED SPI (SPI1) ---
+spi_disp = SPI(1, baudrate=4000000, polarity=0, phase=0, sck=Pin(10), mosi=Pin(11))
+dc = Pin(13, Pin.OUT)
+rst = Pin(12, Pin.OUT)
+cs = Pin(9, Pin.OUT)
+oled = SSD1306_SPI(128, 64, spi_disp, dc, rst, cs)
+
+# --- Servo ---
+servo = PWM(Pin(15))
+servo.freq(50)
+
+# --- Función para mover servo ---
+def move_servo(x, y):
+    pos = (x + y) // 2
+    # Mapear 0–255 a 0.5–2.5 ms (duty 1638–8192)
+    duty = 1638 + int((pos / 255) * (8192 - 1638))
+    servo.duty_u16(duty)
+
+# --- Función para mostrar datos en pantalla ---
+def mostrar_datos(ax, ay, az, joy_x, joy_y):
+    oled.fill(0)
+    oled.text("ACELEROMETRO", 0, 0)
+    oled.text(f"AX:{ax:3d}", 0, 16)
+    oled.text(f"AY:{ay:3d}", 0, 32)
+    oled.text(f"AZ:{az:3d}", 0, 48)
+    oled.text(f"JX:{joy_x:3d} JY:{joy_y:3d}", 70, 0)
+    oled.show()
+
+# --- Bucle principal ---
+while True:
+    if nrf.any():
+        buf = nrf.recv()
+
+        # Convertir bytes a enteros con signo (-128 a 127)
+        def to_signed(val):
+            return val - 256 if val > 127 else val
+
+        joy_x = int(buf[0])
+        joy_y = int(buf[1])
+        ax    = to_signed(buf[2])
+        ay    = to_signed(buf[3])
+        az    = to_signed(buf[4])
+
+        # Mostrar en pantalla y mover servo
+        mostrar_datos(ax, ay, az, joy_x, joy_y)
+        move_servo(joy_x, joy_y)
+
+        # Consola para debug
+        print(f"Joystick X:{joy_x} Y:{joy_y} | AX:{ax} AY:{ay} AZ:{az}")
+
+    sleep(0.1)
